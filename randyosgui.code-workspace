@@ -37,7 +37,12 @@
 		},
 		"[jsonc]": {
 			"editor.defaultColorDecorators": "always"
-		}
+		},
+		"zig.path": "C:/scratch/git/zig-build/bin/stage4/bin/zig.exe",
+    "zig.zls.path": "C:/scratch/git/zig-build/bin/zls/bin/zls.exe",
+		"terminal.integrated.automationProfile.windows": {
+      "path": "C:\\windows\\system32\\cmd.exe",
+    },
 	},
 	"extensions": {
 		"recommendations": [
@@ -54,7 +59,7 @@
 			{
 				"label": "zig: build",
 				"type": "shell",
-				"command": "zig",
+				"command": "${config:zig.path}",
 				"args": [
 					"build"
 				],

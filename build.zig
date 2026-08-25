@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const allow_system_deps = b.option(bool, "allow-system-deps", "Allow relying on globally installed SDK/libs") orelse false;
-    generateCompileCommandsJson() catch |err| {
+    generateCompileCommandsJson(b.graph.io) catch |err| {
         std.debug.panic("failed to generate compile_commands.json: {s}", .{@errorName(err)});
     };
 
@@ -135,8 +135,8 @@ pub fn build(b: *std.Build) void {
 
     const run_tests = b.addRunArtifact(test_exe);
     if (target.result.os.tag == .windows) {
-        run_tests.addPathDir("third_party/glfw/lib/windows");
-        run_tests.addPathDir("third_party/freetype/lib/windows");
+        addPathDir(b, run_tests, "third_party/glfw/lib/windows");
+        addPathDir(b, run_tests, "third_party/freetype/lib/windows");
     }
     // On headless systems set DISPLAY to a Xvfb instance before running:
     //   Xvfb :99 -screen 0 1024x768x24 & DISPLAY=:99 zig build test
@@ -150,19 +150,21 @@ const CompileCommand = struct {
     file: []const u8,
 };
 
-fn generateCompileCommandsJson() !void {
+fn generateCompileCommandsJson(io: std.Io) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const cwd = std.fs.cwd();
-    const cwd_path_native = try std.process.getCwdAlloc(alloc);
-    const cwd_path = try toPosixSlashes(alloc, cwd_path_native);
+    const cwd = std.Io.Dir.cwd();
+    var cwd_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cwd_path_len = try cwd.realPath(io, &cwd_path_buf);
+    const cwd_path = try toPosixSlashes(alloc, cwd_path_buf[0..cwd_path_len]);
 
     var entries = try std.ArrayList(CompileCommand).initCapacity(alloc, 0);
     defer entries.deinit(alloc);
 
     try appendCommandsForDir(
+        io,
         alloc,
         cwd,
         &entries,
@@ -172,6 +174,7 @@ fn generateCompileCommandsJson() !void {
         true,
     );
     try appendCommandsForDir(
+        io,
         alloc,
         cwd,
         &entries,
@@ -181,6 +184,7 @@ fn generateCompileCommandsJson() !void {
         true,
     );
     try appendCommandsForDir(
+        io,
         alloc,
         cwd,
         &entries,
@@ -190,6 +194,7 @@ fn generateCompileCommandsJson() !void {
         false,
     );
     try appendCommandsForDir(
+        io,
         alloc,
         cwd,
         &entries,
@@ -199,6 +204,7 @@ fn generateCompileCommandsJson() !void {
         false,
     );
     try appendCommandsForDir(
+        io,
         alloc,
         cwd,
         &entries,
@@ -214,69 +220,70 @@ fn generateCompileCommandsJson() !void {
         }
     }.lessThan);
 
-    var file = try cwd.createFile("compile_commands.json", .{ .truncate = true });
-    defer file.close();
+    var file = try cwd.createFile(io, "compile_commands.json", .{ .truncate = true });
+    defer file.close(io);
 
-    try writeCompileCommandsJson(&file, entries.items);
+    try writeCompileCommandsJson(io, &file, entries.items);
 }
 
-fn writeCompileCommandsJson(file: *std.fs.File, entries: []const CompileCommand) !void {
-    try file.writeAll("[\n");
+fn writeCompileCommandsJson(io: std.Io, file: *std.Io.File, entries: []const CompileCommand) !void {
+    try file.writeStreamingAll(io, "[\n");
     for (entries, 0..) |entry, idx| {
-        if (idx > 0) try file.writeAll(",\n");
-        try file.writeAll("  {\n");
-        try file.writeAll("    \"directory\": ");
-        try writeJsonString(file, entry.directory);
-        try file.writeAll(",\n");
-        try file.writeAll("    \"command\": ");
-        try writeJsonString(file, entry.command);
-        try file.writeAll(",\n");
-        try file.writeAll("    \"file\": ");
-        try writeJsonString(file, entry.file);
-        try file.writeAll("\n  }");
+        if (idx > 0) try file.writeStreamingAll(io, ",\n");
+        try file.writeStreamingAll(io, "  {\n");
+        try file.writeStreamingAll(io, "    \"directory\": ");
+        try writeJsonString(io, file, entry.directory);
+        try file.writeStreamingAll(io, ",\n");
+        try file.writeStreamingAll(io, "    \"command\": ");
+        try writeJsonString(io, file, entry.command);
+        try file.writeStreamingAll(io, ",\n");
+        try file.writeStreamingAll(io, "    \"file\": ");
+        try writeJsonString(io, file, entry.file);
+        try file.writeStreamingAll(io, "\n  }");
     }
-    try file.writeAll("\n]\n");
+    try file.writeStreamingAll(io, "\n]\n");
 }
 
-fn writeJsonString(file: *std.fs.File, s: []const u8) !void {
-    try writeByte(file, '"');
+fn writeJsonString(io: std.Io, file: *std.Io.File, s: []const u8) !void {
+    try writeByte(io, file, '"');
     for (s) |c| {
         switch (c) {
-            '"' => try file.writeAll("\\\""),
-            '\\' => try file.writeAll("\\\\"),
-            '\n' => try file.writeAll("\\n"),
-            '\r' => try file.writeAll("\\r"),
-            '\t' => try file.writeAll("\\t"),
-            else => try writeByte(file, c),
+            '"' => try file.writeStreamingAll(io, "\\\""),
+            '\\' => try file.writeStreamingAll(io, "\\\\"),
+            '\n' => try file.writeStreamingAll(io, "\\n"),
+            '\r' => try file.writeStreamingAll(io, "\\r"),
+            '\t' => try file.writeStreamingAll(io, "\\t"),
+            else => try writeByte(io, file, c),
         }
     }
-    try writeByte(file, '"');
+    try writeByte(io, file, '"');
 }
 
-fn writeByte(file: *std.fs.File, c: u8) !void {
+fn writeByte(io: std.Io, file: *std.Io.File, c: u8) !void {
     const one = [1]u8{c};
-    try file.writeAll(&one);
+    try file.writeStreamingAll(io, &one);
 }
 
 fn appendCommandsForDir(
+    io: std.Io,
     alloc: std.mem.Allocator,
-    cwd: std.fs.Dir,
+    cwd: std.Io.Dir,
     entries: *std.ArrayList(CompileCommand),
     cwd_path: []const u8,
     root_rel: []const u8,
     ext: []const u8,
     is_header: bool,
 ) !void {
-    var dir = cwd.openDir(root_rel, .{ .iterate = true }) catch |err| {
+    var dir = cwd.openDir(io, root_rel, .{ .iterate = true }) catch |err| {
         if (err == error.FileNotFound) return;
         return err;
     };
-    defer dir.close();
+    defer dir.close(io);
 
     var walker = try dir.walk(alloc);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ext)) continue;
 
@@ -343,7 +350,7 @@ fn toPosixSlashes(alloc: std.mem.Allocator, path: []const u8) ![]const u8 {
 }
 
 fn installIfPresent(b: *std.Build, src_rel: []const u8, dst_rel: []const u8) void {
-    if (pathExists(src_rel)) {
+    if (pathExists(b.graph.io, src_rel)) {
         b.installFile(src_rel, dst_rel);
     }
 }
@@ -356,8 +363,7 @@ fn installRuntimeDlls(b: *std.Build, target: std.Build.ResolvedTarget) void {
 }
 
 fn ensurePath(b: *std.Build, rel_path: []const u8, what: []const u8) void {
-    _ = b;
-    if (!pathExists(rel_path)) {
+    if (!pathExists(b.graph.io, rel_path)) {
         std.debug.panic(
             "missing {s}: {s}\nRun scripts/fetch_deps.ps1 to populate repo-local third_party dependencies.",
             .{ what, rel_path },
@@ -389,19 +395,19 @@ fn validateDependencyLayout(
     }
 }
 
-fn pathExists(rel_path: []const u8) bool {
-    std.fs.cwd().access(rel_path, .{}) catch return false;
+fn pathExists(io: std.Io, rel_path: []const u8) bool {
+    std.Io.Dir.cwd().access(io, rel_path, .{}) catch return false;
     return true;
 }
 
 fn addIncludeIfPresent(mod: *std.Build.Module, b: *std.Build, rel_path: []const u8) void {
-    if (pathExists(rel_path)) {
+    if (pathExists(b.graph.io, rel_path)) {
         mod.addIncludePath(b.path(rel_path));
     }
 }
 
 fn addLibPathIfPresent(mod: *std.Build.Module, b: *std.Build, rel_path: []const u8) void {
-    if (pathExists(rel_path)) {
+    if (pathExists(b.graph.io, rel_path)) {
         mod.addLibraryPath(b.path(rel_path));
     }
 }
@@ -502,9 +508,21 @@ fn buildExample(
 
     const run = b.addRunArtifact(exe);
     if (target.result.os.tag == .windows) {
-        run.addPathDir("third_party/glfw/lib/windows");
-        run.addPathDir("third_party/freetype/lib/windows");
+        addPathDir(b, run, "third_party/glfw/lib/windows");
+        addPathDir(b, run, "third_party/freetype/lib/windows");
     }
     const step = b.step("run-" ++ name, "Run the " ++ name ++ " example");
     step.dependOn(&run.step);
+}
+
+/// Replacement for the old `Step.Run.addPathDir`, which no longer exists:
+/// prepends `dir` to the child process's PATH environment variable.
+fn addPathDir(b: *std.Build, run: *std.Build.Step.Run, dir: []const u8) void {
+    const env_map = run.getEnvMap();
+    const existing = env_map.get("PATH") orelse "";
+    const new_value = if (existing.len == 0)
+        dir
+    else
+        b.fmt("{s}{c}{s}", .{ dir, std.fs.path.delimiter, existing });
+    env_map.put("PATH", new_value) catch @panic("OOM");
 }
